@@ -1,0 +1,91 @@
+name: Build Windows (custom server)
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: Server URL the app connects to
+        required: true
+        default: https://cap.withabdul.com
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      CAP_BUNDLE: apps/desktop-gpui/target/x86_64-pc-windows-msvc/release/bundle
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          target: x86_64-pc-windows-msvc
+          prefix-key: v1-rust-custom
+          save-cache: true
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            apps/desktop-gpui -> target
+
+      - uses: ./.github/actions/setup-js
+
+      - name: Create .env file
+        shell: bash
+        run: |
+          {
+            echo "VITE_ENVIRONMENT=production"
+            echo "NEXT_PUBLIC_WEB_URL=${{ inputs.server_url }}"
+            echo "NEXTAUTH_URL=${{ inputs.server_url }}"
+            echo "VITE_SERVER_URL=${{ inputs.server_url }}"
+            echo "RUST_TARGET_TRIPLE=$TARGET"
+          } >> .env
+
+      - name: Run cap-setup
+        shell: bash
+        run: bun run cap-setup
+
+      - name: Build desktop binaries
+        shell: bash
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: ./scripts/build-desktop-binaries.sh "$TARGET"
+
+      - name: Increase pagefile size
+        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 24GB
+          disk-root: "D:"
+
+      - name: Disable updater artifacts
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "apps/desktop-gpui/tauri.conf.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            c.bundle.createUpdaterArtifacts = false;
+            fs.writeFileSync(p, JSON.stringify(c, null, "\t"));
+          '
+
+      - name: Build app
+        shell: bash
+        env:
+          CI: false
+        run: node scripts/bundle-gpui.mjs "$TARGET" --no-bundle
+
+      - name: Bundle NSIS installer
+        shell: bash
+        run: node scripts/bundle-gpui.mjs "$TARGET" --skip-build --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cap-windows-installer
+          path: ${{ env.CAP_BUNDLE }}/nsis/*.exe
+          if-no-files-found: error
